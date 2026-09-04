@@ -162,7 +162,7 @@ func bukaESP32() (string, error) {
 func main() {
 	flag.StringVar(&espIP, "esp-ip", "192.168.0.237", "alamat IP ESP32 di jaringan lokal")
 	flag.StringVar(&waURL, "wa-url", "http://192.168.0.135:8006/wablas/send-message-to-group", "endpoint wablas untuk kirim pesan grup")
-	flag.StringVar(&waGroupID, "wa-group", "120363336918907038@g.us", "group_id WA tujuan notifikasi")
+	flag.StringVar(&waGroupID, "wa-group", "120363422555070122@g.us", "group_id WA tujuan notifikasi")
 	flag.StringVar(&ruang, "ruang", "Sparepart", "nama ruangan yang dikontrol pintu ini")
 	port := flag.String("port", "8018", "port web server ini")
 	flag.Parse()
