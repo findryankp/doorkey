@@ -1,0 +1,11 @@
+# Build output
+*.exe
+doorkey
+
+# Database
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Go

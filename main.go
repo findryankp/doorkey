@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 var (
@@ -21,8 +24,10 @@ var (
 	waURL      string
 	waGroupID  string
 	ruang      string
+	dbPath     string
 	httpClient = &http.Client{Timeout: 5 * time.Second}
 	waktuLoc   *time.Location
+	db         *sql.DB
 )
 
 const waMessageTemplate = "🔐 AKSES RUANGAN 🔐\n" +
@@ -67,6 +72,8 @@ const pageTemplate = `<!DOCTYPE html>
 	</div>
 
 	<p id="status"></p>
+
+	<p><a href="/riwayat">Lihat Riwayat Akses</a></p>
 
 	<script>
 		const karyawan = {
@@ -119,6 +126,79 @@ const pageTemplate = `<!DOCTYPE html>
 </body>
 </html>`
 
+const riwayatTemplate = `<!DOCTYPE html>
+<html lang="id">
+<head>
+	<meta charset="UTF-8">
+	<title>Riwayat Akses</title>
+	<style>
+		body { font-family: sans-serif; text-align: center; margin: 40px; }
+		.filter { margin-bottom: 20px; }
+		.filter input { font-size: 16px; padding: 6px; }
+		.filter button { font-size: 15px; padding: 6px 14px; margin-left: 6px; cursor: pointer; }
+		table { border-collapse: collapse; margin: 0 auto; min-width: 700px; }
+		th, td { border: 1px solid #ccc; padding: 8px 14px; text-align: left; }
+		th { background: #1565c0; color: white; }
+		tr:nth-child(even) { background: #f5f5f5; }
+		#empty { color: #777; margin-top: 20px; }
+	</style>
+</head>
+<body>
+	<h1>Riwayat Akses (20 Terbaru)</h1>
+
+	<div class="filter">
+		<label>Filter Tanggal: </label>
+		<input type="date" id="tanggal" onchange="muatLog()">
+		<button onclick="resetFilter()">Reset</button>
+	</div>
+
+	<table id="tabelLog">
+		<thead>
+			<tr>
+				<th>Waktu</th>
+				<th>Nama</th>
+				<th>Noreg</th>
+				<th>Bagian</th>
+				<th>Ruang</th>
+			</tr>
+		</thead>
+		<tbody id="isiTabel"></tbody>
+	</table>
+	<p id="empty" style="display:none">Tidak ada data.</p>
+
+	<p><a href="/">Kembali ke Kontrol Pintu</a></p>
+
+	<script>
+		async function muatLog() {
+			const tanggal = document.getElementById('tanggal').value;
+			const res = await fetch('/api/logs' + (tanggal ? ('?tanggal=' + tanggal) : ''));
+			const data = await res.json();
+
+			const tbody = document.getElementById('isiTabel');
+			tbody.innerHTML = '';
+			document.getElementById('empty').style.display = data.length ? 'none' : 'block';
+
+			for (const log of data) {
+				const tr = document.createElement('tr');
+				tr.innerHTML = '<td>' + log.waktu + '</td>' +
+					'<td>' + log.nama + '</td>' +
+					'<td>' + log.noreg + '</td>' +
+					'<td>' + log.bagian + '</td>' +
+					'<td>' + log.ruang + '</td>';
+				tbody.appendChild(tr);
+			}
+		}
+
+		function resetFilter() {
+			document.getElementById('tanggal').value = '';
+			muatLog();
+		}
+
+		muatLog();
+	</script>
+</body>
+</html>`
+
 type accessRequest struct {
 	Noreg  string `json:"noreg"`
 	Nama   string `json:"nama"`
@@ -144,6 +224,65 @@ func kirimWA(message string) error {
 	return nil
 }
 
+func initDB(path string) error {
+	var err error
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS akses_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		nama TEXT NOT NULL,
+		noreg TEXT NOT NULL,
+		bagian TEXT NOT NULL,
+		ruang TEXT NOT NULL,
+		waktu TEXT NOT NULL
+	)`)
+	return err
+}
+
+func catatAkses(nama, noreg, bagian, ruangAkses string, waktu time.Time) error {
+	_, err := db.Exec(
+		`INSERT INTO akses_log (nama, noreg, bagian, ruang, waktu) VALUES (?, ?, ?, ?, ?)`,
+		nama, noreg, bagian, ruangAkses, waktu.Format("2006-01-02 15:04:05"),
+	)
+	return err
+}
+
+type accessLog struct {
+	Nama   string `json:"nama"`
+	Noreg  string `json:"noreg"`
+	Bagian string `json:"bagian"`
+	Ruang  string `json:"ruang"`
+	Waktu  string `json:"waktu"`
+}
+
+// ambilLog mengembalikan 20 log terbaru, atau 20 log terbaru pada tanggal
+// tertentu (format tanggal "2006-01-02") kalau tanggal diisi.
+func ambilLog(tanggal string) ([]accessLog, error) {
+	rows, err := db.Query(
+		`SELECT nama, noreg, bagian, ruang, waktu FROM akses_log
+		 WHERE ? = '' OR substr(waktu, 1, 10) = ?
+		 ORDER BY waktu DESC LIMIT 20`,
+		tanggal, tanggal,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	logs := []accessLog{}
+	for rows.Next() {
+		var l accessLog
+		if err := rows.Scan(&l.Nama, &l.Noreg, &l.Bagian, &l.Ruang, &l.Waktu); err != nil {
+			return nil, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, rows.Err()
+}
+
 func bukaESP32() (string, error) {
 	url := fmt.Sprintf("http://%s/door?state=1", espIP)
 	resp, err := httpClient.Get(url)
@@ -164,6 +303,7 @@ func main() {
 	flag.StringVar(&waURL, "wa-url", "http://192.168.0.135:8006/wablas/send-message-to-group", "endpoint wablas untuk kirim pesan grup")
 	flag.StringVar(&waGroupID, "wa-group", "120363422555070122@g.us", "group_id WA tujuan notifikasi")
 	flag.StringVar(&ruang, "ruang", "Sparepart", "nama ruangan yang dikontrol pintu ini")
+	flag.StringVar(&dbPath, "db-path", "doorkey.db", "path file database SQLite untuk log akses")
 	port := flag.String("port", "8018", "port web server ini")
 	flag.Parse()
 
@@ -173,10 +313,31 @@ func main() {
 		waktuLoc = time.FixedZone("WIB", 7*60*60)
 	}
 
+	if err := initDB(dbPath); err != nil {
+		log.Fatal("gagal membuka database:", err)
+	}
+	defer db.Close()
+
 	tmpl := template.Must(template.New("page").Parse(pageTemplate))
+	riwayatTmpl := template.Must(template.New("riwayat").Parse(riwayatTemplate))
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		tmpl.Execute(w, nil)
+	})
+
+	http.HandleFunc("/riwayat", func(w http.ResponseWriter, r *http.Request) {
+		riwayatTmpl.Execute(w, nil)
+	})
+
+	http.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
+		tanggal := r.URL.Query().Get("tanggal")
+		logs, err := ambilLog(tanggal)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("gagal mengambil log: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(logs)
 	})
 
 	http.HandleFunc("/door", func(w http.ResponseWriter, r *http.Request) {
@@ -221,8 +382,8 @@ func main() {
 			return
 		}
 
-		waktu := time.Now().In(waktuLoc).Format("02 Jan 2006, 15:04:05 WIB")
-		message := fmt.Sprintf(waMessageTemplate, ruang, req.Nama, req.Bagian, waktu)
+		waktuSekarang := time.Now().In(waktuLoc)
+		message := fmt.Sprintf(waMessageTemplate, ruang, req.Nama, req.Bagian, waktuSekarang.Format("02 Jan 2006, 15:04:05 WIB"))
 
 		if err := kirimWA(message); err != nil {
 			log.Println("gagal mengirim notifikasi WA:", err)
@@ -232,6 +393,10 @@ func main() {
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
+		}
+
+		if err := catatAkses(req.Nama, req.Noreg, req.Bagian, ruang, waktuSekarang); err != nil {
+			log.Println("gagal menyimpan log akses ke database:", err)
 		}
 
 		log.Println("Akses dicatat:", req.Noreg, "-", req.Nama, "-", req.Bagian)
