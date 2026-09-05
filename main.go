@@ -283,6 +283,20 @@ func ambilLog(tanggal string) ([]accessLog, error) {
 	return logs, rows.Err()
 }
 
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
+}
+
 func bukaESP32() (string, error) {
 	url := fmt.Sprintf("http://%s/door?state=1", espIP)
 	resp, err := httpClient.Get(url)
@@ -321,15 +335,15 @@ func main() {
 	tmpl := template.Must(template.New("page").Parse(pageTemplate))
 	riwayatTmpl := template.Must(template.New("riwayat").Parse(riwayatTemplate))
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		tmpl.Execute(w, nil)
-	})
+	}))
 
-	http.HandleFunc("/riwayat", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/riwayat", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		riwayatTmpl.Execute(w, nil)
-	})
+	}))
 
-	http.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/logs", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		tanggal := r.URL.Query().Get("tanggal")
 		logs, err := ambilLog(tanggal)
 		if err != nil {
@@ -338,9 +352,9 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(logs)
-	})
+	}))
 
-	http.HandleFunc("/door", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/door", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		state := r.URL.Query().Get("state")
 		if state != "1" && state != "0" {
 			http.Error(w, "state harus 1 (buka) atau 0 (tutup)", http.StatusBadRequest)
@@ -368,10 +382,10 @@ func main() {
 		}
 		log.Println("Perintah", action, "berhasil dikirim. Balasan ESP32:", string(body))
 		fmt.Fprintf(w, "Perintah %s berhasil dikirim. Balasan ESP32: %s", action, string(body))
-	})
+	}))
 
 	// endpoint backup: mencatat identitas + kirim notifikasi WA, lalu tetap membuka ESP32 yang sama
-	http.HandleFunc("/access", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/access", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		req := accessRequest{
 			Noreg:  r.URL.Query().Get("noreg"),
 			Nama:   r.URL.Query().Get("nama"),
@@ -401,7 +415,7 @@ func main() {
 
 		log.Println("Akses dicatat:", req.Noreg, "-", req.Nama, "-", req.Bagian)
 		fmt.Fprintf(w, "Pintu dibuka untuk %s (%s, %s). Balasan ESP32: %s", req.Nama, req.Noreg, req.Bagian, espResp)
-	})
+	}))
 
 	addr := ":" + *port
 	log.Printf("Server berjalan di http://localhost%s (meneruskan ke ESP32 di %s)\n", addr, espIP)
