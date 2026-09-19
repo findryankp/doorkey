@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"database/sql"
 	"encoding/json"
@@ -14,6 +15,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -22,7 +25,7 @@ import (
 var (
 	espIP      string
 	waURL      string
-	waGroupID  string
+	waGroupIDs []string
 	ruang      string
 	dbPath     string
 	httpClient = &http.Client{Timeout: 5 * time.Second}
@@ -37,7 +40,8 @@ const waMessageTemplate = "🔐 AKSES RUANGAN 🔐\n" +
 	"🆔 Bagian: %s\n" +
 	"⏰ Waktu : %s\n" +
 	"━━━━━━━━━━━━━━━━━━━━\n" +
-	"Akses ruangan berhasil dicatat oleh sistem."
+	"Akses ruangan berhasil dicatat oleh sistem.\n"+
+	"_`#p5 #accesskey`_"
 
 const pageTemplate = `<!DOCTYPE html>
 <html lang="id">
@@ -206,22 +210,87 @@ type accessRequest struct {
 }
 
 func kirimWA(message string) error {
-	payload, _ := json.Marshal(map[string]string{
-		"group_id": waGroupID,
-		"message":  message,
-	})
-
-	resp, err := httpClient.Post(waURL, "application/json", bytes.NewReader(payload))
-	if err != nil {
-		return err
+	if len(waGroupIDs) == 0 {
+		return fmt.Errorf("tidak ada group_id WA yang dikonfigurasi")
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+	var errs []string
+	for _, groupID := range waGroupIDs {
+		payload, err := json.Marshal(map[string]string{
+			"group_id": groupID,
+			"message":  message,
+		})
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("grup %s (marshal error): %v", groupID, err))
+			continue
+		}
+
+		resp, err := httpClient.Post(waURL, "application/json", bytes.NewReader(payload))
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("grup %s: %v", groupID, err))
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			errs = append(errs, fmt.Sprintf("grup %s status %d: %s", groupID, resp.StatusCode, string(body)))
+			continue
+		}
+		resp.Body.Close()
+		log.Printf("Notifikasi WA berhasil dikirim ke grup: %s\n", groupID)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// loadEnv membaca file format KEY=VALUE sederhana dan menyimpannya ke environment jika belum disetel
+func loadEnv(filepath string) {
+	file, err := os.Open(filepath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			val = strings.Trim(val, `"'`)
+			if os.Getenv(key) == "" {
+				os.Setenv(key, val)
+			}
+		}
+	}
+}
+
+func getEnvAny(defaultVal string, keys ...string) string {
+	for _, key := range keys {
+		if val := os.Getenv(key); val != "" {
+			return val
+		}
+	}
+	return defaultVal
+}
+
+func parseGroupIDs(raw string) []string {
+	var list []string
+	for _, item := range strings.Split(raw, ",") {
+		trimmed := strings.TrimSpace(item)
+		if trimmed != "" {
+			list = append(list, trimmed)
+		}
+	}
+	return list
 }
 
 func initDB(path string) error {
@@ -313,13 +382,26 @@ func bukaESP32() (string, error) {
 }
 
 func main() {
-	flag.StringVar(&espIP, "esp-ip", "192.168.0.237", "alamat IP ESP32 di jaringan lokal")
-	flag.StringVar(&waURL, "wa-url", "http://192.168.0.135:8006/wablas/send-message-to-group", "endpoint wablas untuk kirim pesan grup")
-	flag.StringVar(&waGroupID, "wa-group", "120363422555070122@g.us", "group_id WA tujuan notifikasi")
-	flag.StringVar(&ruang, "ruang", "Sparepart", "nama ruangan yang dikontrol pintu ini")
-	flag.StringVar(&dbPath, "db-path", "doorkey.db", "path file database SQLite untuk log akses")
-	port := flag.String("port", "8018", "port web server ini")
+	loadEnv(".env")
+
+	defaultESP := getEnvAny("192.168.0.237", "ESP_IP")
+	defaultWAURL := getEnvAny("http://192.168.0.135:8006/wablas/send-message-to-group", "WA_URL")
+	defaultWAGroups := getEnvAny("120363422555070122@g.us", "WA_GROUP_IDS", "WA_GROUPS", "WA_GROUP")
+	defaultRuang := getEnvAny("Sparepart", "RUANG")
+	defaultDBPath := getEnvAny("doorkey.db", "DB_PATH")
+	defaultPort := getEnvAny("8018", "PORT")
+
+	var waGroupsRaw string
+	flag.StringVar(&espIP, "esp-ip", defaultESP, "alamat IP ESP32 di jaringan lokal")
+	flag.StringVar(&waURL, "wa-url", defaultWAURL, "endpoint wablas untuk kirim pesan grup")
+	flag.StringVar(&waGroupsRaw, "wa-groups", defaultWAGroups, "group_id WA tujuan notifikasi (pisahkan koma jika lebih dari 1 grup)")
+	flag.StringVar(&waGroupsRaw, "wa-group", defaultWAGroups, "alias untuk -wa-groups")
+	flag.StringVar(&ruang, "ruang", defaultRuang, "nama ruangan yang dikontrol pintu ini")
+	flag.StringVar(&dbPath, "db-path", defaultDBPath, "path file database SQLite untuk log akses")
+	port := flag.String("port", defaultPort, "port web server ini")
 	flag.Parse()
+
+	waGroupIDs = parseGroupIDs(waGroupsRaw)
 
 	var err error
 	waktuLoc, err = time.LoadLocation("Asia/Jakarta")
@@ -419,5 +501,6 @@ func main() {
 
 	addr := ":" + *port
 	log.Printf("Server berjalan di http://localhost%s (meneruskan ke ESP32 di %s)\n", addr, espIP)
+	log.Printf("Notifikasi WA dikonfigurasi ke %d grup: %v\n", len(waGroupIDs), waGroupIDs)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }

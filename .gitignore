@@ -8,4 +8,6 @@ doorkey
 *.db-shm
 *.db-wal
 
+
 # Go
+.gocache
