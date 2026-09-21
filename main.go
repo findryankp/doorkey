@@ -41,7 +41,7 @@ const waMessageTemplate = "🔐 AKSES RUANGAN 🔐\n" +
 	"⏰ Waktu : %s\n" +
 	"━━━━━━━━━━━━━━━━━━━━\n" +
 	"Akses ruangan berhasil dicatat oleh sistem.\n"+
-	"_`#p5 #accesskey`_"
+	"_`#p5 #accesskey #sparepart #others`_"
 
 const pageTemplate = `<!DOCTYPE html>
 <html lang="id">
