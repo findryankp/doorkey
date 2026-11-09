@@ -23,14 +23,15 @@ import (
 )
 
 var (
-	espIP      string
-	waURL      string
-	waGroupIDs []string
-	ruang      string
-	dbPath     string
-	httpClient = &http.Client{Timeout: 5 * time.Second}
-	waktuLoc   *time.Location
-	db         *sql.DB
+	espIP       string
+	waURL       string
+	waGroupIDs  []string
+	ruang       string
+	dbPath      string
+	interlockIP string
+	httpClient  = &http.Client{Timeout: 5 * time.Second}
+	waktuLoc    *time.Location
+	db          *sql.DB
 )
 
 const waMessageTemplate = "🔐 AKSES RUANGAN 🔐\n" +
@@ -381,6 +382,30 @@ func bukaESP32() (string, error) {
 	return string(body), nil
 }
 
+// proxyInterlock meneruskan GET ke perangkat interlock shotblast tumbler
+// (mis. /interlock/status, /interlock/on, /interlock/off) dan mengirim balik
+// balasannya apa adanya ke client.
+func proxyInterlock(w http.ResponseWriter, path string) {
+	url := fmt.Sprintf("http://%s%s", interlockIP, path)
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("gagal menghubungi interlock shotblast tumbler: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, fmt.Sprintf("interlock membalas status %d: %s", resp.StatusCode, string(body)), http.StatusBadGateway)
+		return
+	}
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.Write(body)
+}
+
 func main() {
 	loadEnv(".env")
 
@@ -390,9 +415,11 @@ func main() {
 	defaultRuang := getEnvAny("Sparepart", "RUANG")
 	defaultDBPath := getEnvAny("doorkey.db", "DB_PATH")
 	defaultPort := getEnvAny("8018", "PORT")
+	defaultInterlockIP := getEnvAny("192.168.0.222", "INTERLOCK_IP")
 
 	var waGroupsRaw string
 	flag.StringVar(&espIP, "esp-ip", defaultESP, "alamat IP ESP32 di jaringan lokal")
+	flag.StringVar(&interlockIP, "interlock-ip", defaultInterlockIP, "alamat IP interlock shotblast tumbler di jaringan lokal")
 	flag.StringVar(&waURL, "wa-url", defaultWAURL, "endpoint wablas untuk kirim pesan grup")
 	flag.StringVar(&waGroupsRaw, "wa-groups", defaultWAGroups, "group_id WA tujuan notifikasi (pisahkan koma jika lebih dari 1 grup)")
 	flag.StringVar(&waGroupsRaw, "wa-group", defaultWAGroups, "alias untuk -wa-groups")
@@ -497,6 +524,20 @@ func main() {
 
 		log.Println("Akses dicatat:", req.Noreg, "-", req.Nama, "-", req.Bagian)
 		fmt.Fprintf(w, "Pintu dibuka untuk %s (%s, %s). Balasan ESP32: %s", req.Nama, req.Noreg, req.Bagian, espResp)
+	}))
+
+	// endpoint fitur shotblast tumbler: meneruskan ke perangkat interlock
+	// (status/on/off) di jaringan lokal lewat path server ini sendiri
+	http.HandleFunc("/shotblast/status", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		proxyInterlock(w, "/interlock/status")
+	}))
+
+	http.HandleFunc("/shotblast/on", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		proxyInterlock(w, "/interlock/on")
+	}))
+
+	http.HandleFunc("/shotblast/off", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		proxyInterlock(w, "/interlock/off")
 	}))
 
 	addr := ":" + *port
